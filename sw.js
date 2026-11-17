@@ -9,8 +9,9 @@ const STATIC_FILES = [
   './db-helper.js',
   './app.js',
   './manifest.json',
-  './icon-192.png',
-  './icon-512.png'
+  './favicon.ico',
+  './icons/icon-192.png',
+  './icons/icon-512.png'
 ];
 
 // Ciclo de vida: Instalación del sw y precaché del App Shell
