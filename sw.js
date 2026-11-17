@@ -1,4 +1,7 @@
-const CACHE_STATIC_NAME = 'static-outbox-v1';
+// Importar el mini-wrapper de IndexedDB en el contexto del sw
+importScripts('./db-helper.js');
+
+const CACHE_STATIC_NAME = 'static-outbox-v2';
 const STATIC_FILES = [
   './',
   './index.html',
@@ -12,11 +15,11 @@ const STATIC_FILES = [
 
 // Ciclo de vida: Instalación del sw y precaché del App Shell
 self.addEventListener('install', (event) => {
-  console.log('[SW] Instalando sw v1...');
+  console.log('[SW] Instalando sw...');
   event.waitUntil(
     caches.open(CACHE_STATIC_NAME)
       .then((cache) => {
-        console.log('[SW] Precargando App Shell en caché estática v1...');
+        console.log('[SW] Precargando App Shell en caché estática...');
         return cache.addAll(STATIC_FILES);
       })
       .then(() => {
@@ -25,16 +28,16 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Ciclo de vida: Activación del sw y limpieza de cachés antiguas
+// Ciclo de vida: Activación del sw y depuración de cachés antiguas
 self.addEventListener('activate', (event) => {
-  console.log('[SW] Activando sw v1...');
+  console.log('[SW] Activando sw y limpiando cachés antiguas...');
   event.waitUntil(
     caches.keys()
       .then((keys) => {
         return Promise.all(
           keys.map((key) => {
             if (key !== CACHE_STATIC_NAME) {
-              console.log('[SW] Eliminando caché previa:', key);
+              console.log('[SW] Eliminando caché previa obsoleta:', key);
               return caches.delete(key);
             }
           })
@@ -48,7 +51,7 @@ self.addEventListener('activate', (event) => {
 
 // Ciclo de vida: Intercepción de peticiones (Cache First para archivos estáticos GET)
 self.addEventListener('fetch', (event) => {
-  // Las peticiones POST no se almacenan en Cache API
+  // Las mutaciones POST y otros métodos HTTP no se almacenan en Cache API
   if (event.request.method !== 'GET') {
     return;
   }
@@ -62,10 +65,72 @@ self.addEventListener('fetch', (event) => {
 
         return fetch(event.request)
           .catch(() => {
+            // Si la red falla y es navegación HTML, devolver la vista principal
             if (event.request.mode === 'navigate') {
               return caches.match('./index.html');
             }
           });
       })
   );
+});
+
+function notificarClientesActualizacion() {
+  return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    .then((clientes) => {
+      clientes.forEach((cliente) => {
+        cliente.postMessage({
+          tipo: 'OUTBOX_SINCRONIZADO',
+          timestamp: Date.now()
+        });
+      });
+    });
+}
+
+function sincronizarPendientesSW() {
+  console.log('[SW-Sync] Ejecutando barrido de transacciones pendientes...');
+
+  return obtenerTodosLosRegistros()
+    .then((registros) => {
+      const pendientes = registros.filter((item) => item.estado === 'pendiente');
+
+      if (pendientes.length === 0) {
+        console.log('[SW-Sync] Cola limpia. Nada por sincronizar.');
+        return;
+      }
+
+      const promesasDeEnvio = pendientes.map((item) => {
+        return fetch('https://jsonplaceholder.typicode.com/posts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: item.titulo,
+            body: item.descripcion
+          })
+        })
+          .then((respuesta) => {
+            if (!respuesta.ok) {
+              throw new Error(`Error HTTP ${respuesta.status} al sincronizar ID ${item.id}`);
+            }
+            return actualizarEstadoRegistro(item.id, 'sincronizado');
+          });
+      });
+
+      return Promise.all(promesasDeEnvio)
+        .then(() => notificarClientesActualizacion());
+    });
+}
+
+self.addEventListener('sync', (event) => {
+  console.log('[SW-Sync] Evento sync disparado con etiqueta:', event.tag);
+
+  if (event.tag === 'sync-reportes') {
+    event.waitUntil(
+      sincronizarPendientesSW()
+        .catch((error) => {
+          console.error('[SW-Sync] Falla en sincronización; el navegador reintentará luego:', error);
+          // Relanzar el error indica al navegador que debe reprogramar un reintento automático
+          throw error;
+        })
+    );
+  }
 });

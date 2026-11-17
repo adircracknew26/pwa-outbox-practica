@@ -39,26 +39,32 @@ function procesarEnvioReporte(datos) {
         descripcion: datos.descripcion,
         estado: 'pendiente',
         fechaCreacion: Date.now()
-      });
+      })
+        .then(() => {
+          // Si el navegador soporta Background Sync, le delegamos la tarea al sw
+          if ('serviceWorker' in navigator && 'SyncManager' in window) {
+            return navigator.serviceWorker.ready.then((swReg) => {
+              console.log('[App] Registrando tarea de sync en sw: sync-reportes');
+              return swReg.sync.register('sync-reportes');
+            });
+          }
+        });
     })
     .then(() => {
       return renderizarColaOutbox();
     });
 }
 
-function sincronizarPendientes() {
-  console.log('[App] Conexión detectada. Buscando pendientes...');
+// Fallback para navegadores que no soportan Background Sync (ej. Safari en iOS)
+function sincronizarPendientesFallback() {
+  console.log('[App] Conexión detectada. Ejecutando sincronización de respaldo...');
 
   return obtenerTodosLosRegistros()
     .then((registros) => {
       const pendientes = registros.filter((item) => item.estado === 'pendiente');
 
-      if (pendientes.length === 0) {
-        console.log('[App] Nada pendiente por enviar.');
-        return;
-      }
+      if (pendientes.length === 0) return;
 
-      // Reenviamos todos los reportes pendientes juntos con Promise.all
       const promesasDeEnvio = pendientes.map((item) => {
         return fetch(ENDPOINT_API, {
           method: 'POST',
@@ -70,7 +76,6 @@ function sincronizarPendientes() {
         })
           .then((res) => {
             if (!res.ok) throw new Error('Error al reintentar');
-            // Cambiamos el estado a sincronizado en la base de datos local
             return actualizarEstadoRegistro(item.id, 'sincronizado');
           });
       });
@@ -81,7 +86,7 @@ function sincronizarPendientes() {
       return renderizarColaOutbox();
     })
     .catch((error) => {
-      console.error('[App] Error al sincronizar pendientes:', error);
+      console.error('[App] Error al sincronizar pendientes fallback:', error);
     });
 }
 
@@ -160,6 +165,13 @@ function inicializarSW() {
     .catch((error) => {
       console.error('[App] Error al registrar sw:', error);
     });
+
+  // Cuando el sw termina de sincronizar en segundo plano, actualizamos la vista
+  navigator.serviceWorker.addEventListener('message', (evento) => {
+    if (evento.data && evento.data.tipo === 'OUTBOX_SINCRONIZADO') {
+      renderizarColaOutbox();
+    }
+  });
 }
 
 formReporte.addEventListener('submit', (evento) => {
@@ -197,10 +209,12 @@ botonLimpiar.addEventListener('click', () => {
     });
 });
 
-// Al recuperar internet, intentamos enviar lo que quedó pendiente
 window.addEventListener('online', () => {
   actualizarEstadoConexion();
-  sincronizarPendientes();
+  // Solo ejecutamos fallback si el navegador no tiene Background Sync
+  if (!('SyncManager' in window)) {
+    sincronizarPendientesFallback();
+  }
 });
 
 window.addEventListener('offline', actualizarEstadoConexion);
